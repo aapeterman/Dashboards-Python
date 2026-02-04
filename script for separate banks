@@ -1,0 +1,122 @@
+import plaid
+from plaid.api import plaid_api
+from plaid.model.transactions_sync_request import TransactionsSyncRequest
+from plaid.configuration import Configuration
+from plaid.api_client import ApiClient
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import pandas as pd
+import os
+from datetime import datetime
+from dotenv import load_dotenv
+import numpy as np
+
+def clean_nan(df):
+    df = df.replace([np.nan, np.inf, -np.inf], '')
+    df = df.astype(str).replace('nan', '').replace('None', '').replace('inf', '').replace('-inf', '')
+    return df
+
+load_dotenv()
+
+CLIENT_ID = os.getenv('PLAID_CLIENT_ID')
+SECRET = os.getenv('PLAID_SECRET')
+ENV = os.getenv('PLAID_ENV', 'sandbox')
+
+configuration = Configuration(
+    host=getattr(plaid.Environment, ENV.capitalize()),
+    api_key={'clientId': CLIENT_ID, 'secret': SECRET}
+)
+api_client = ApiClient(configuration)
+client = plaid_api.PlaidApi(api_client)
+
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+gc = gspread.authorize(creds)
+spreadsheet = gc.open('Plaid_Transactions')
+
+# Define tab names for each token
+BANK_TABS = {
+    os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business',
+    os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal',
+}
+
+# Load tokens from .env
+ACCESS_TOKENS = []
+token_keys = ['PLAID_ACCESS_TOKEN', 'PLAID_ACCESS_TOKEN_2']
+for key in token_keys:
+    token = os.getenv(key)
+    if token:
+        ACCESS_TOKENS.append(token)
+        print(f"Loaded token from {key}: {token[:20]}...")
+
+if not ACCESS_TOKENS:
+    print("No access tokens found in .env")
+    exit()
+
+print(f"Found {len(ACCESS_TOKENS)} tokens to sync")
+
+for token in ACCESS_TOKENS:
+    tab_name = BANK_TABS.get(token, 'Unknown Bank')
+    print(f"Syncing '{tab_name}' with token {token[:20]}...")
+
+    cursor_file = f'plaid_cursor_{token[:8]}.txt'
+    cursor = None
+    if os.path.exists(cursor_file):
+        with open(cursor_file, 'r') as f:
+            cursor = f.read().strip()
+
+    sync_cursor = cursor if cursor is not None else ""
+
+    request = TransactionsSyncRequest(access_token=token, cursor=sync_cursor)
+
+    try:
+        response = client.transactions_sync(request)
+        transactions = response['added'] + response['modified']
+
+        if transactions:
+            df_new = pd.DataFrame([t.to_dict() for t in transactions])
+
+            # Flatten/stringify nested fields
+            for col in df_new.columns:
+                df_new[col] = df_new[col].apply(lambda x: json.dumps(x, default=str) if isinstance(x, (list, dict)) else ('' if pd.isna(x) else str(x)))
+
+            df_new = clean_nan(df_new)
+
+            # Add Year, Month, Day
+            if 'date' in df_new.columns:
+                df_new['Year'] = df_new['date'].apply(lambda x: x[:4] if x and len(x) >= 4 else '')
+                df_new['Month'] = df_new['date'].apply(lambda x: x[5:7] if x and len(x) >= 7 else '')
+                df_new['Day'] = df_new['date'].apply(lambda x: x[8:10] if x and len(x) >= 10 else '')
+
+            # Add Bank Source column
+            df_new['Bank Source'] = tab_name
+
+            # Get or create tab
+            try:
+                worksheet = spreadsheet.worksheet(tab_name)
+                print(f"Using existing tab: {tab_name}")
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet = spreadsheet.add_worksheet(title=tab_name, rows=2000, cols=50)
+                print(f"Created new tab: {tab_name}")
+
+            # Append new rows
+            existing_data = worksheet.get_all_records()
+            if existing_data:
+                df_existing = pd.DataFrame(existing_data)
+                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                df_combined.drop_duplicates(subset=['transaction_id'], keep='last', inplace=True)
+                worksheet.update([df_combined.columns.values.tolist()] + df_combined.values.tolist())
+            else:
+                worksheet.update([df_new.columns.values.tolist()] + df_new.values.tolist())
+
+            print(f"Added/updated {len(df_new)} transactions in tab '{tab_name}'")
+
+        if response['next_cursor']:
+            with open(cursor_file, 'w') as f:
+                f.write(response['next_cursor'])
+
+    except Exception as e:
+        print(f"Error with token {token[:20]}...: {e}")
+
+print("Sync complete for all banks.")
