@@ -1,0 +1,113 @@
+import plaid
+from plaid.api import plaid_api
+from plaid.model.transactions_sync_request import TransactionsSyncRequest
+from plaid.model.accounts_balance_get_request import AccountsBalanceGetRequest
+from plaid.configuration import Configuration
+from plaid.api_client import ApiClient
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import pandas as pd
+import os
+from datetime import datetime
+from dotenv import load_dotenv
+import numpy as np
+
+def clean_nan(df):
+    df = df.replace([np.nan, np.inf, -np.inf], '')
+    df = df.astype(str).replace('nan', '').replace('None', '').replace('inf', '').replace('-inf', '')
+    return df
+
+load_dotenv()
+
+CLIENT_ID = os.getenv('PLAID_CLIENT_ID')
+SECRET = os.getenv('PLAID_SECRET')
+ENV = os.getenv('PLAID_ENV', 'sandbox')
+
+configuration = Configuration(
+    host=getattr(plaid.Environment, ENV.capitalize()),
+    api_key={'clientId': CLIENT_ID, 'secret': SECRET}
+)
+api_client = ApiClient(configuration)
+client = plaid_api.PlaidApi(api_client)
+
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+gc = gspread.authorize(creds)
+spreadsheet = gc.open('Plaid_Transactions')
+
+WORKSHEET_NAME = 'All Transactions'
+try:
+    worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    print(f"Using existing tab: {WORKSHEET_NAME}")
+except gspread.exceptions.WorksheetNotFound:
+    worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=50)
+    print(f"Created new tab: {WORKSHEET_NAME}")
+
+BANK_NAMES = {
+    os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business',
+    os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal',
+}
+
+ACCESS_TOKENS = []
+token_keys = ['PLAID_ACCESS_TOKEN', 'PLAID_ACCESS_TOKEN_2']
+for key in token_keys:
+    token = os.getenv(key)
+    if token:
+        ACCESS_TOKENS.append(token)
+        print(f"Loaded token from {key}: {token[:20]}...")
+
+if not ACCESS_TOKENS:
+    print("No access tokens found in .env")
+    exit()
+
+print(f"Found {len(ACCESS_TOKENS)} tokens to sync")
+
+all_transactions = []
+
+for token in ACCESS_TOKENS:
+    bank_name = BANK_NAMES.get(token, 'Unknown Bank')
+    print(f"Syncing '{bank_name}' with token {token[:20]}...")
+
+    cursor_file = f'plaid_cursor_{token[:8]}.txt'
+    cursor = None
+    if os.path.exists(cursor_file):
+        with open(cursor_file, 'r') as f:
+            cursor = f.read().strip()
+
+    sync_cursor = cursor if cursor is not None else ""
+
+    request = TransactionsSyncRequest(access_token=token, cursor=sync_cursor)
+
+    try:
+        response = client.transactions_sync(request)
+        transactions = response['added'] + response['modified']
+
+        all_transactions.extend(transactions)
+
+        if response['next_cursor']:
+            with open(cursor_file, 'w') as f:
+                f.write(response['next_cursor'])
+
+        print(f"Added/updated {len(transactions)} transactions from '{bank_name}'")
+
+        # Fetch balances for this token
+        try:
+            balance_request = AccountsBalanceGetRequest(access_token=token)
+            balance_response = client.accounts_balance_get(balance_request)
+            accounts = balance_response['accounts']
+            print(f"Balances for {bank_name}: {len(accounts)} accounts")
+            for acc in accounts:
+                bal = acc['balances']
+                print(f"  Account: {acc['name']} ({acc['type']})")
+                print(f"    Available: {bal.get('available')}")
+                print(f"    Current: {bal.get('current')}")
+                print(f"    Limit: {bal.get('limit')}")
+                print(f"    Currency: {bal.get('iso_currency_code')}")
+        except Exception as e:
+            print(f"Error fetching balances for {bank_name}: {e}")
+
+    except Exception as e:
+        print(f"Error with token {token[:20]}...: {e}")
+
+print("Sync complete for all banks.")
