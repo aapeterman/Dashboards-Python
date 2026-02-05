@@ -36,19 +36,22 @@ creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', sco
 gc = gspread.authorize(creds)
 spreadsheet = gc.open('Plaid_Transactions')
 
-WORKSHEET_NAME = 'All Transactions'
+# Combined tab for transactions
+TRANSACTIONS_TAB = 'All Transactions'
 try:
-    worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
-    print(f"Using existing tab: {WORKSHEET_NAME}")
+    transactions_worksheet = spreadsheet.worksheet(TRANSACTIONS_TAB)
+    print(f"Using existing transactions tab: {TRANSACTIONS_TAB}")
 except gspread.exceptions.WorksheetNotFound:
-    worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=50)
-    print(f"Created new tab: {WORKSHEET_NAME}")
+    transactions_worksheet = spreadsheet.add_worksheet(title=TRANSACTIONS_TAB, rows=2000, cols=50)
+    print(f"Created transactions tab: {TRANSACTIONS_TAB}")
 
-BANK_NAMES = {
-    os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business',
-    os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal',
+# Separate balance tabs per bank
+BALANCE_TABS = {
+    os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business Balance',
+    os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal Balance',
 }
 
+# Load tokens from .env
 ACCESS_TOKENS = []
 token_keys = ['PLAID_ACCESS_TOKEN', 'PLAID_ACCESS_TOKEN_2']
 for key in token_keys:
@@ -66,8 +69,10 @@ print(f"Found {len(ACCESS_TOKENS)} tokens to sync")
 all_transactions = []
 
 for token in ACCESS_TOKENS:
-    bank_name = BANK_NAMES.get(token, 'Unknown Bank')
-    print(f"Syncing '{bank_name}' with token {token[:20]}...")
+    bank_name = BANK_NAMES.get(token, 'Unknown Bank') if 'BANK_NAMES' in globals() else 'Unknown Bank'
+    balance_tab_name = BALANCE_TABS.get(token, 'Unknown Balance')
+
+    print(f"Syncing transactions for '{bank_name}' with token {token[:20]}...")
 
     cursor_file = f'plaid_cursor_{token[:8]}.txt'
     cursor = None
@@ -89,23 +94,47 @@ for token in ACCESS_TOKENS:
             with open(cursor_file, 'w') as f:
                 f.write(response['next_cursor'])
 
-        print(f"Added/updated {len(transactions)} transactions from '{bank_name}'")
+        print(f"Added/updated {len(transactions)} transactions to '{TRANSACTIONS_TAB}'")
 
         # Fetch balances for this token
         try:
             balance_request = AccountsBalanceGetRequest(access_token=token)
             balance_response = client.accounts_balance_get(balance_request)
-            accounts = balance_response['accounts']
-            print(f"Balances for {bank_name}: {len(accounts)} accounts")
+            # Convert Plaid objects to plain dicts to avoid serialization errors
+            accounts = [acc.to_dict() for acc in balance_response['accounts']]
+            print(f"Balances for {balance_tab_name}: {len(accounts)} accounts")
+
+            # Get or create balance tab
+            try:
+                balance_worksheet = spreadsheet.worksheet(balance_tab_name)
+                print(f"Using existing balance tab: {balance_tab_name}")
+            except gspread.exceptions.WorksheetNotFound:
+                balance_worksheet = spreadsheet.add_worksheet(title=balance_tab_name, rows=2000, cols=50)
+                print(f"Created new balance tab: {balance_tab_name}")
+
+            # Append balance rows
+            balance_rows = []
             for acc in accounts:
                 bal = acc['balances']
-                print(f"  Account: {acc['name']} ({acc['type']})")
-                print(f"    Available: {bal.get('available')}")
-                print(f"    Current: {bal.get('current')}")
-                print(f"    Limit: {bal.get('limit')}")
-                print(f"    Currency: {bal.get('iso_currency_code')}")
+                balance_rows.append([
+                    acc['account_id'],
+                    acc['name'],
+                    acc['type'],
+                    acc['subtype'],
+                    bal.get('available'),
+                    bal.get('current'),
+                    bal.get('limit'),
+                    bal.get('iso_currency_code'),
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    bank_name
+                ])
+
+            if balance_rows:
+                balance_worksheet.append_rows(balance_rows, value_input_option='RAW')
+                print(f"Appended {len(balance_rows)} balance rows to '{balance_tab_name}'")
+
         except Exception as e:
-            print(f"Error fetching balances for {bank_name}: {e}")
+            print(f"Error fetching balances for {balance_tab_name}: {e}")
 
     except Exception as e:
         print(f"Error with token {token[:20]}...: {e}")
