@@ -1,7 +1,6 @@
 import plaid
 from plaid.api import plaid_api
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
-from plaid.model.accounts_balance_get_request import AccountsBalanceGetRequest
 from plaid.configuration import Configuration
 from plaid.api_client import ApiClient
 import json
@@ -42,21 +41,22 @@ creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', sco
 gc = gspread.authorize(creds)
 spreadsheet = gc.open('Plaid_Transactions')
 
-# Transaction tabs per bank
-TRANSACTION_TABS = {
+# Single combined tab for all transactions
+WORKSHEET_NAME = 'All Transactions Combined'
+try:
+    worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    print(f"Using existing tab: {WORKSHEET_NAME}")
+except gspread.exceptions.WorksheetNotFound:
+    worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=2000, cols=100)
+    print(f"Created new tab: {WORKSHEET_NAME}")
+
+BANK_NAMES = {
     os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business',
     os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal',
     os.getenv('PLAID_ACCESS_TOKEN_3'): 'Chase',
 }
 
-# Balance tabs per bank
-BALANCE_TABS = {
-    os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business Balance',
-    os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal Balance',
-    os.getenv('PLAID_ACCESS_TOKEN_3'): 'Chase Balance',
-}
-
-# Load tokens from .env
+# Load all tokens
 ACCESS_TOKENS = []
 token_keys = ['PLAID_ACCESS_TOKEN', 'PLAID_ACCESS_TOKEN_2', 'PLAID_ACCESS_TOKEN_3']
 for key in token_keys:
@@ -71,11 +71,11 @@ if not ACCESS_TOKENS:
 
 print(f"Found {len(ACCESS_TOKENS)} tokens to sync")
 
-for token in ACCESS_TOKENS:
-    transaction_tab_name = TRANSACTION_TABS.get(token, 'Unknown Transactions')
-    balance_tab_name = BALANCE_TABS.get(token, 'Unknown Balance')
+all_transactions = []
 
-    print(f"Syncing transactions for '{transaction_tab_name}' with token {token[:20]}...")
+for token in ACCESS_TOKENS:
+    bank_name = BANK_NAMES.get(token, 'Unknown Bank')
+    print(f"Syncing '{bank_name}' with token {token[:20]}...")
 
     cursor_file = f'plaid_cursor_{token[:8]}.txt'
     cursor = None
@@ -107,90 +107,54 @@ for token in ACCESS_TOKENS:
 
     transactions = response['added'] + response['modified']
 
-    if transactions:
-        df_new = pd.DataFrame([t.to_dict() for t in transactions])
+    # Tag each transaction with bank name
+    for t in transactions:
+        t['bank_name'] = bank_name
 
-        # Flatten/stringify nested fields
-        for col in df_new.columns:
-            df_new[col] = df_new[col].apply(lambda x: json.dumps(x, default=str) if isinstance(x, (list, dict)) else ('' if pd.isna(x) else str(x)))
-
-        # Clean deeply
-        df_new = df_new.map(clean_nan)
-
-        # Add Year, Month, Day
-        if 'date' in df_new.columns:
-            df_new['Year'] = df_new['date'].apply(lambda x: x[:4] if x and len(x) >= 4 else '')
-            df_new['Month'] = df_new['date'].apply(lambda x: x[5:7] if x and len(x) >= 7 else '')
-            df_new['Day'] = df_new['date'].apply(lambda x: x[8:10] if x and len(x) >= 10 else '')
-
-        # Add Bank Name column
-        df_new['Bank Name'] = transaction_tab_name
-
-        # Get or create transaction tab
-        try:
-            transaction_worksheet = spreadsheet.worksheet(transaction_tab_name)
-            print(f"Using existing transaction tab: {transaction_tab_name}")
-        except gspread.exceptions.WorksheetNotFound:
-            transaction_worksheet = spreadsheet.add_worksheet(title=transaction_tab_name, rows=2000, cols=50)
-            print(f"Created new transaction tab: {transaction_tab_name}")
-
-        # Append transaction rows
-        existing_data = transaction_worksheet.get_all_records()
-        if existing_data:
-            df_existing = pd.DataFrame(existing_data)
-            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-            df_combined.drop_duplicates(subset=['transaction_id'], keep='last', inplace=True)
-            transaction_worksheet.update([df_combined.columns.values.tolist()] + df_combined.values.tolist())
-        else:
-            transaction_worksheet.update([df_new.columns.values.tolist()] + df_new.values.tolist())
-
-        print(f"Added/updated {len(df_new)} transactions to '{transaction_tab_name}'")
+    all_transactions.extend(transactions)
 
     if response['next_cursor']:
         with open(cursor_file, 'w') as f:
             f.write(response['next_cursor'])
 
-    # Fetch and append balances to separate tab
-    try:
-        balance_request = AccountsBalanceGetRequest(access_token=token)
-        balance_response = client.accounts_balance_get(balance_request)
-        # Convert Plaid objects to plain dicts
-        accounts = [acc.to_dict() for acc in balance_response['accounts']]
-        print(f"Balances for {balance_tab_name}: {len(accounts)} accounts")
+    print(f"Added/updated {len(transactions)} transactions from '{bank_name}'")
 
-        # Get or create balance tab
-        try:
-            balance_worksheet = spreadsheet.worksheet(balance_tab_name)
-            print(f"Using existing balance tab: {balance_tab_name}")
-        except gspread.exceptions.WorksheetNotFound:
-            balance_worksheet = spreadsheet.add_worksheet(title=balance_tab_name, rows=2000, cols=50)
-            # Add headers to new balance tab
-            headers = ['account_id', 'name', 'type', 'subtype', 'pending', 'current', 'limit', 'iso_currency_code', 'timestamp', 'bank_name']
-            balance_worksheet.update([headers])
-            print(f"Created new balance tab with headers: {balance_tab_name}")
+# Process combined transactions
+if all_transactions:
+    df_new = pd.DataFrame([t.to_dict() for t in all_transactions])
 
-        # Append balance rows
-        balance_rows = []
-        for acc in accounts:
-            bal = acc['balances']
-            balance_rows.append([
-                acc['account_id'],
-                acc['name'],
-                acc['type'],
-                acc['subtype'],
-                bal.get('pending'),
-                bal.get('current'),
-                bal.get('limit'),
-                bal.get('iso_currency_code'),
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                transaction_tab_name
-            ])
+    # Flatten/stringify nested fields
+    for col in df_new.columns:
+        df_new[col] = df_new[col].apply(lambda x: json.dumps(x, default=str) if isinstance(x, (list, dict)) else ('' if pd.isna(x) else str(x)))
 
-        if balance_rows:
-            balance_worksheet.append_rows(balance_rows, value_input_option='RAW')
-            print(f"Appended {len(balance_rows)} balance rows to '{balance_tab_name}'")
+    # Deep clean (this fixes nan crash)
+    df_new = df_new.map(clean_nan)
 
-    except Exception as e:
-        print(f"Error fetching balances for {balance_tab_name}: {e}")
+    # Add Year, Month, Day
+    if 'date' in df_new.columns:
+        df_new['Year'] = df_new['date'].apply(lambda x: x[:4] if x and len(x) >= 4 else '')
+        df_new['Month'] = df_new['date'].apply(lambda x: x[5:7] if x and len(x) >= 7 else '')
+        df_new['Day'] = df_new['date'].apply(lambda x: x[8:10] if x and len(x) >= 10 else '')
+
+    # Add Bank Name column
+    df_new['Bank Name'] = df_new['bank_name']
+
+    # Drop temporary bank_name column if you don't want it
+    if 'bank_name' in df_new.columns:
+        df_new = df_new.drop(columns=['bank_name'])
+
+    # Append to the single combined tab
+    existing_data = worksheet.get_all_records()
+    if existing_data:
+        df_existing = pd.DataFrame(existing_data)
+        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        df_combined.drop_duplicates(subset=['transaction_id'], keep='last', inplace=True)
+        worksheet.update([df_combined.columns.values.tolist()] + df_combined.values.tolist())
+    else:
+        worksheet.update([df_new.columns.values.tolist()] + df_new.values.tolist())
+
+    print(f"Total added/updated {len(df_new)} transactions in '{WORKSHEET_NAME}'")
+else:
+    print("No new transactions")
 
 print("Sync complete for all banks.")
