@@ -42,14 +42,13 @@ def click_continue_if_present(wait, timeout=3):
             if btn.is_displayed() and btn.is_enabled():
                 btn.click()
                 print("Clicked popup 'Continue'")
-                time.sleep(3)
                 return True
         except:
             pass
         time.sleep(0.5)
     return False
 
-def tab_n_times_then_enter(n_tabs, delay=0.3):
+def tab_n_times_then_enter(n_tabs, delay=0.2):
     actions = ActionChains(driver)
     print(f"Pressing Tab {n_tabs} times...")
     for _ in range(n_tabs):
@@ -57,7 +56,6 @@ def tab_n_times_then_enter(n_tabs, delay=0.3):
         time.sleep(delay)
     actions.send_keys(Keys.ENTER).perform()
     print(f"Pressed Enter after {n_tabs} Tabs")
-    time.sleep(3)
 
 try:
     print("Opening Airbnb login page...")
@@ -73,7 +71,6 @@ try:
         ))
         continue_email_btn.click()
         print("Clicked 'Continue with email'")
-        time.sleep(4)
     except:
         print("No 'Continue with email' found - assuming email field visible...")
 
@@ -89,7 +86,6 @@ try:
     ))
     continue_btn.click()
     print("Clicked Continue after email")
-    time.sleep(10)
 
     print("Waiting for password field...")
     password_field = wait.until(EC.presence_of_element_located(
@@ -100,8 +96,6 @@ try:
     actions = ActionChains(driver)
     actions.move_to_element(password_field).click().send_keys(PASSWORD).send_keys(Keys.ENTER).perform()
     print("Typed password and sent Enter key")
-
-    time.sleep(8)
 
     # === AUTO-CLICK "Got it" POPUP AFTER LOGIN ===
     print("Looking for 'Got it' popup after login...")
@@ -114,20 +108,12 @@ try:
     wait.until(EC.url_contains("hosting") or EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Hosting')]")))
     print("Hosting dashboard loaded")
 
-    # === WAIT 3 SECONDS ON HOSTING ===
-    print("Waiting 3 seconds on hosting page...")
-    time.sleep(3)
-
     # === NAVIGATE TO EARNINGS ===
     print("Navigating to Earnings...")
     driver.get("https://www.airbnb.com/users/transaction_history")
 
     wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Transaction history') or contains(text(), 'Earnings') or contains(text(), 'Payouts')]")))
     print("Earnings page loaded")
-
-    # === WAIT 3 SECONDS ON EARNINGS ===
-    print("Waiting 3 seconds on earnings page...")
-    time.sleep(3)
 
     # === CLICK "Continue" ON EARNINGS PAGE ===
     print("Checking for 'Continue' popup on earnings page...")
@@ -137,25 +123,20 @@ try:
         ))
         continue_btn.click()
         print("Clicked 'Continue' on earnings popup")
-        time.sleep(3)
     except:
         print("No 'Continue' popup on earnings page - proceeding...")
-
-    # === WAIT 3 SECONDS AFTER CONTINUE ===
-    print("Waiting 3 seconds after 'Continue'...")
-    time.sleep(3)
 
     # === TAB → DOWN → TAB → ENTER TO SELECT WADE CARTER ===
     print("Switching to Wade Carter with Tab → Down → Tab → Enter...")
     try:
         actions = ActionChains(driver)
-        actions.send_keys(Keys.TAB).perform()          # Tab to enter group
+        actions.send_keys(Keys.TAB).perform()
         time.sleep(0.5)
-        actions.send_keys(Keys.ARROW_DOWN).perform()   # Down to Wade
+        actions.send_keys(Keys.ARROW_DOWN).perform()
         time.sleep(0.5)
-        actions.send_keys(Keys.TAB).perform()          # Tab again
+        actions.send_keys(Keys.TAB).perform()
         time.sleep(0.5)
-        actions.send_keys(Keys.ENTER).perform()        # Enter to select
+        actions.send_keys(Keys.ENTER).perform()
         print("Pressed Tab → Down → Tab → Enter - should have selected Wade Carter")
         time.sleep(4)
     except Exception as e:
@@ -181,6 +162,7 @@ try:
         print("Clicked 'Create report'")
         time.sleep(60)
 
+        # Move upcoming CSV to target folder (overwrite if exists)
         downloaded_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.csv')]
         if downloaded_files:
             latest_file = max(downloaded_files, key=lambda f: os.path.getctime(os.path.join(DOWNLOAD_DIR, f)))
@@ -189,24 +171,12 @@ try:
             if os.path.exists(new_path):
                 os.remove(new_path)
             shutil.copy(old_path, new_path)
-            print(f"Upcoming CSV copied to target folder: {new_path}")
+            print(f"Upcoming CSV copied to: {new_path}")
     except Exception as e:
         print("Error downloading Upcoming CSV:", e)
 
-    # === GO BACK TO MAIN EARNINGS ===
-    print("Going back with Alt + Left Arrow...")
-    try:
-        actions = ActionChains(driver)
-        actions.key_down(Keys.ALT).send_keys(Keys.LEFT).key_up(Keys.ALT).perform()
-        print("Pressed Alt + Left Arrow")
-        time.sleep(3)
-    except Exception as e:
-        print("Alt + Left Arrow failed:", e)
-        driver.back()
-        time.sleep(3)
-
-    # === VIEW ALL PAID (Tab 32x → Enter) ===
-    print("Navigating to 'View all paid' with 32 Tabs + Enter...")
+    # === TAB 32x → Enter (for View all paid) ===
+    print("Tab 32x + Enter...")
     tab_n_times_then_enter(n_tabs=32)
 
     # === DOWNLOAD PAID CSV ===
@@ -225,6 +195,7 @@ try:
         print("Clicked 'Create report'")
         time.sleep(60)
 
+        # Move paid CSV to target folder (overwrite if exists)
         downloaded_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.csv')]
         if downloaded_files:
             latest_file = max(downloaded_files, key=lambda f: os.path.getctime(os.path.join(DOWNLOAD_DIR, f)))
@@ -233,10 +204,10 @@ try:
             if os.path.exists(new_path):
                 os.remove(new_path)
             shutil.copy(old_path, new_path)
-            print(f"Paid CSV copied to target folder: {new_path}")
+            print(f"Paid CSV copied to: {new_path}")
     except Exception as e:
         print("Error downloading Paid CSV:", e)
 
 finally:
     driver.quit()
-    print("Browser closed. CSVs downloaded and copied to target folder.")
+    print("Browser closed. CSVs copied to target folder.")
