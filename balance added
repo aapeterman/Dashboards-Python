@@ -48,12 +48,13 @@ def click_continue_if_present(wait, timeout=3):
         time.sleep(0.5)
     return False
 
-def tab_n_times_then_enter(n_tabs, delay=0.2):
+def tab_n_times_then_enter(n_tabs, delay=0.15):
     actions = ActionChains(driver)
-    print(f"Pressing Tab {n_tabs} times...")
-    for _ in range(n_tabs):
+    print(f"Starting {n_tabs}x Tab loop...")
+    for i in range(n_tabs):
         actions.send_keys(Keys.TAB).perform()
         time.sleep(delay)
+        print(f"Tab {i+1}/{n_tabs}")
     actions.send_keys(Keys.ENTER).perform()
     print(f"Pressed Enter after {n_tabs} Tabs")
 
@@ -130,17 +131,21 @@ try:
     print("Switching to Wade Carter with Tab → Down → Tab → Enter...")
     try:
         actions = ActionChains(driver)
+        print("Step 1: Sending Tab...")
         actions.send_keys(Keys.TAB).perform()
-        time.sleep(0.5)
+        time.sleep(0.4)
+        print("Step 2: Sending Down arrow...")
         actions.send_keys(Keys.ARROW_DOWN).perform()
-        time.sleep(0.5)
+        time.sleep(0.4)
+        print("Step 3: Sending Tab again...")
         actions.send_keys(Keys.TAB).perform()
-        time.sleep(0.5)
+        time.sleep(0.4)
+        print("Step 4: Sending Enter...")
         actions.send_keys(Keys.ENTER).perform()
         print("Pressed Tab → Down → Tab → Enter - should have selected Wade Carter")
-        time.sleep(4)
+        time.sleep(5)  # Give time for page to load Wade's earnings
     except Exception as e:
-        print("Keyboard selection failed:", e)
+        print("Keyboard sequence failed:", e)
 
     # === VIEW ALL UPCOMING (Tab 28x → Enter) ===
     print("Navigating to 'View all upcoming' with 28 Tabs + Enter...")
@@ -162,7 +167,7 @@ try:
         print("Clicked 'Create report'")
         time.sleep(60)
 
-        # Move upcoming CSV to target folder (overwrite if exists)
+        # Copy upcoming CSV to target folder (overwrite if exists)
         downloaded_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.csv')]
         if downloaded_files:
             latest_file = max(downloaded_files, key=lambda f: os.path.getctime(os.path.join(DOWNLOAD_DIR, f)))
@@ -175,9 +180,13 @@ try:
     except Exception as e:
         print("Error downloading Upcoming CSV:", e)
 
-    # === TAB 32x → Enter (for View all paid) ===
-    print("Tab 32x + Enter...")
-    tab_n_times_then_enter(n_tabs=32)
+    # === TAB 10x → Enter TO GO BACK ===
+    print("Going back with Tab 10x + Enter...")
+    tab_n_times_then_enter(n_tabs=10)
+
+    # === TAB 40x → Enter FOR PAID ===
+    print("Tab 40x + Enter for paid...")
+    tab_n_times_then_enter(n_tabs=40)
 
     # === DOWNLOAD PAID CSV ===
     print("Downloading Paid CSV...")
@@ -195,7 +204,7 @@ try:
         print("Clicked 'Create report'")
         time.sleep(60)
 
-        # Move paid CSV to target folder (overwrite if exists)
+        # Copy paid CSV to target folder (overwrite if exists)
         downloaded_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.csv')]
         if downloaded_files:
             latest_file = max(downloaded_files, key=lambda f: os.path.getctime(os.path.join(DOWNLOAD_DIR, f)))
