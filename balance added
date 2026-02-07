@@ -1,217 +1,124 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
-from webdriver_manager.chrome import ChromeDriverManager
-import time
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import pandas as pd
 import os
-import shutil
+from datetime import datetime
+from dotenv import load_dotenv
 
-# === CONFIG ===
-EMAIL = "apeterman413@gmail.com"
-PASSWORD = "Precision53$#@!"
-DOWNLOAD_DIR = os.path.expanduser("~/Downloads")
-TARGET_DIR = r"C:\Users\aaron\quickstart\python"
+load_dotenv('- wade.env')
 
-UPCOMING_FINAL = "airbnb_pending.csv"
-PAID_FINAL = "airbnb_paid.csv"
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds_path = os.getenv('GOOGLE_CREDENTIALS_PATH', 'wade-service-account.json')
+creds = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
+gc = gspread.authorize(creds)
 
-os.makedirs(TARGET_DIR, exist_ok=True)
+spreadsheet = gc.open("Wade Finance Dashboard")
+print("Opened: Wade Finance Dashboard\n")
 
-chrome_options = Options()
-chrome_options.add_experimental_option("prefs", {
-    "download.default_directory": DOWNLOAD_DIR,
-    "download.prompt_for_download": False,
-    "download.directory_upgrade": True,
-    "safebrowsing.enabled": True
-})
-chrome_options.add_argument("--start-maximized")
+# Per-bank transaction tabs (from your last run)
+per_bank_tabs = [
+    'First Bank Transactions',
+    'Stockmens Transactions',
+    'First Citizens Transactions',
+    'ENT Transactions'
+]
 
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=chrome_options)
+# Combined Transactions tab
+combined_tx_tab = 'All Transactions Combined'
 
-def click_continue_if_present(wait, timeout=3):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Continue') or contains(text(), 'Got it') or contains(text(), 'OK') or contains(text(), 'Confirm') or contains(text(), 'Done')] | //div[contains(@class, 'center') or contains(@style, 'center')]//button | //*[contains(@role, 'dialog')]//button")
-            if btn.is_displayed() and btn.is_enabled():
-                btn.click()
-                print("Clicked popup 'Continue'")
-                return True
-        except:
-            pass
-        time.sleep(0.5)
-    return False
+print("Stacking transactions from per-bank tabs...")
 
-def tab_n_times_then_enter(n_tabs, delay=0.2):
-    actions = ActionChains(driver)
-    print(f"Pressing Tab {n_tabs} times...")
-    for _ in range(n_tabs):
-        actions.send_keys(Keys.TAB).perform()
-        time.sleep(delay)
-    actions.send_keys(Keys.ENTER).perform()
-    print(f"Pressed Enter after {n_tabs} Tabs")
+all_tx_rows = []
 
-try:
-    print("Opening Airbnb login page...")
-    driver.get("https://www.airbnb.com/login")
-
-    wait = WebDriverWait(driver, 60)
-
-    # === LOGIN FLOW ===
-    print("Looking for 'Continue with email'...")
+for tab_name in per_bank_tabs:
     try:
-        continue_email_btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//*[contains(text(), 'Continue with email') or contains(text(), 'email')] | //button[contains(@aria-label, 'email')]")
-        ))
-        continue_email_btn.click()
-        print("Clicked 'Continue with email'")
-    except:
-        print("No 'Continue with email' found - assuming email field visible...")
+        ws = spreadsheet.worksheet(tab_name)
+        rows = ws.get_all_values()
+        if not rows:
+            print(f"  {tab_name} is empty - skipping")
+            continue
 
-    print("Entering email...")
-    email_field = wait.until(EC.presence_of_element_located(
-        (By.CSS_SELECTOR, "input[type='email'], input[name='email'], input[placeholder*='email'], input[id*='email']")
-    ))
-    email_field.clear()
-    email_field.send_keys(EMAIL)
+        headers = rows[0]
+        bank_name = tab_name.replace(' Transactions', '')  # e.g. "First Bank"
+        print(f"  Reading {tab_name} ({len(rows)-1} rows)")
 
-    continue_btn = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//button[contains(text(), 'Continue')] | //button[@type='submit'] | //button[contains(@data-testid, 'continue')]")
-    ))
-    continue_btn.click()
-    print("Clicked Continue after email")
-
-    print("Waiting for password field...")
-    password_field = wait.until(EC.presence_of_element_located(
-        (By.CSS_SELECTOR, "input[type='password'], input[name='password'], input[placeholder*='password'], input[id*='password'], input[autocomplete='current-password']")
-    ))
-    password_field.clear()
-
-    actions = ActionChains(driver)
-    actions.move_to_element(password_field).click().send_keys(PASSWORD).send_keys(Keys.ENTER).perform()
-    print("Typed password and sent Enter key")
-
-    # === AUTO-CLICK "Got it" POPUP AFTER LOGIN ===
-    print("Looking for 'Got it' popup after login...")
-    click_continue_if_present(wait)
-
-    # === NAVIGATE TO HOSTING ===
-    print("Navigating to Hosting dashboard...")
-    driver.get("https://www.airbnb.com/hosting")
-
-    wait.until(EC.url_contains("hosting") or EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Hosting')]")))
-    print("Hosting dashboard loaded")
-
-    # === NAVIGATE TO EARNINGS ===
-    print("Navigating to Earnings...")
-    driver.get("https://www.airbnb.com/users/transaction_history")
-
-    wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Transaction history') or contains(text(), 'Earnings') or contains(text(), 'Payouts')]")))
-    print("Earnings page loaded")
-
-    # === CLICK "Continue" ON EARNINGS PAGE ===
-    print("Checking for 'Continue' popup on earnings page...")
-    try:
-        continue_btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//button[contains(text(), 'Continue')] | //div[contains(@class, 'center') or contains(@style, 'center')]//button[contains(text(), 'Continue')]")
-        ))
-        continue_btn.click()
-        print("Clicked 'Continue' on earnings popup")
-    except:
-        print("No 'Continue' popup on earnings page - proceeding...")
-
-    # === TAB → DOWN → TAB → ENTER TO SELECT WADE CARTER ===
-    print("Switching to Wade Carter with Tab → Down → Tab → Enter...")
-    try:
-        actions = ActionChains(driver)
-        actions.send_keys(Keys.TAB).perform()
-        time.sleep(0.5)
-        actions.send_keys(Keys.ARROW_DOWN).perform()
-        time.sleep(0.5)
-        actions.send_keys(Keys.TAB).perform()
-        time.sleep(0.5)
-        actions.send_keys(Keys.ENTER).perform()
-        print("Pressed Tab → Down → Tab → Enter - should have selected Wade Carter")
-        time.sleep(4)
+        for row in rows[1:]:
+            row_dict = dict(zip(headers, row))
+            row_dict['bank_name'] = bank_name
+            all_tx_rows.append(row_dict)
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"  Tab not found: {tab_name} - skipping")
     except Exception as e:
-        print("Keyboard selection failed:", e)
+        print(f"  Error reading {tab_name}: {str(e)[:100]}...")
 
-    # === VIEW ALL UPCOMING (Tab 28x → Enter) ===
-    print("Navigating to 'View all upcoming' with 28 Tabs + Enter...")
-    tab_n_times_then_enter(n_tabs=28)
+if all_tx_rows:
+    df_all = pd.DataFrame(all_tx_rows)
 
-    # === DOWNLOAD UPCOMING CSV ===
-    print("Downloading Upcoming CSV...")
+    # Clean column order
+    desired_cols = df_all.columns.tolist()  # keep existing columns
+    if 'bank_name' not in desired_cols:
+        desired_cols.append('bank_name')
+
+    df_all = df_all.reindex(columns=desired_cols)
+
     try:
-        get_report_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Get report') or contains(text(), 'Get CSV report')]")))
-        get_report_btn.click()
-        print("Clicked 'Get report'")
+        ws_comb = spreadsheet.worksheet(combined_tx_tab)
+    except gspread.exceptions.WorksheetNotFound:
+        ws_comb = spreadsheet.add_worksheet(title=combined_tx_tab, rows=10000, cols=100)
 
-        open_device_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Open on your device')]")))
-        open_device_btn.click()
-        print("Clicked 'Open on your device'")
+    ws_comb.clear()
+    ws_comb.append_rows([df_all.columns.tolist()] + df_all.values.tolist())
+    print(f"→ All Transactions Combined: {len(df_all)} rows (stacked from per-bank tabs)")
+else:
+    print("No transaction data found in per-bank tabs.")
 
-        create_report_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Create report')]")))
-        create_report_btn.click()
-        print("Clicked 'Create report'")
-        time.sleep(60)
+# Combined Balances - stack from per-bank balance tabs
+print("\nStacking balances...")
 
-        # Copy upcoming CSV to target folder (overwrite if exists)
-        downloaded_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.csv')]
-        if downloaded_files:
-            latest_file = max(downloaded_files, key=lambda f: os.path.getctime(os.path.join(DOWNLOAD_DIR, f)))
-            old_path = os.path.join(DOWNLOAD_DIR, latest_file)
-            new_path = os.path.join(TARGET_DIR, UPCOMING_FINAL)
-            if os.path.exists(new_path):
-                os.remove(new_path)
-            shutil.copy(old_path, new_path)
-            print(f"Upcoming CSV copied to: {new_path}")
-    except Exception as e:
-        print("Error downloading Upcoming CSV:", e)
+combined_bal_rows = []
 
-    # === TAB 10x → Enter TO GO BACK ===
-    print("Going back with Tab 10x + Enter...")
-    tab_n_times_then_enter(n_tabs=10)
+balance_tabs = [
+    'First Bank Balance',
+    'Stockmens Balance',
+    'First Citizens Balance',
+    'ENT Balance'
+]
 
-    # === TAB 32x → Enter FOR PAID ===
-    print("Tab 32x + Enter for paid...")
-    tab_n_times_then_enter(n_tabs=40)
-
-    # === DOWNLOAD PAID CSV ===
-    print("Downloading Paid CSV...")
+for tab_name in balance_tabs:
     try:
-        get_report_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Get report') or contains(text(), 'Get CSV report')]")))
-        get_report_btn.click()
-        print("Clicked 'Get report'")
+        ws_bal = spreadsheet.worksheet(tab_name)
+        rows = ws_bal.get_all_values()
+        if not rows:
+            print(f"  {tab_name} is empty - skipping")
+            continue
 
-        open_device_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Open on your device')]")))
-        open_device_btn.click()
-        print("Clicked 'Open on your device'")
+        headers = rows[0]
+        bank_name = tab_name.replace(' Balance', '')
+        print(f"  Reading {tab_name} ({len(rows)-1} rows)")
 
-        create_report_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Create report')]")))
-        create_report_btn.click()
-        print("Clicked 'Create report'")
-        time.sleep(60)
-
-        # Copy paid CSV to target folder (overwrite if exists)
-        downloaded_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.csv')]
-        if downloaded_files:
-            latest_file = max(downloaded_files, key=lambda f: os.path.getctime(os.path.join(DOWNLOAD_DIR, f)))
-            old_path = os.path.join(DOWNLOAD_DIR, latest_file)
-            new_path = os.path.join(TARGET_DIR, PAID_FINAL)
-            if os.path.exists(new_path):
-                os.remove(new_path)
-            shutil.copy(old_path, new_path)
-            print(f"Paid CSV copied to: {new_path}")
+        for row in rows[1:]:
+            row_dict = dict(zip(headers, row))
+            row_dict['bank_name'] = bank_name
+            combined_bal_rows.append(row_dict)
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"  Tab not found: {tab_name} - skipping")
     except Exception as e:
-        print("Error downloading Paid CSV:", e)
+        print(f"  Error reading {tab_name}: {str(e)[:100]}...")
 
-finally:
-    driver.quit()
-    print("Browser closed. CSVs copied to target folder.")
+if combined_bal_rows:
+    df_bal = pd.DataFrame(combined_bal_rows)
+
+    ws_bal_comb = spreadsheet.worksheet('Combined Balances') if 'Combined Balances' in [w.title for w in spreadsheet.worksheets()] else \
+                   spreadsheet.add_worksheet(title='Combined Balances', rows=200, cols=20)
+
+    ws_bal_comb.clear()
+    ws_bal_comb.append_rows([df_bal.columns.tolist()] + df_bal.values.tolist())
+    print(f"→ Combined Balances: {len(df_bal)} rows (stacked from per-bank balance tabs)")
+else:
+    print("No balance data found in per-bank tabs.")
+
+print("\nFinished. Refresh the sheet.")
+print("Check:")
+print("• Per-bank transaction tabs")
+print("• All Transactions Combined (stacked with bank_name)")
+print("• Combined Balances (stacked total balance)")
