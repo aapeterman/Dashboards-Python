@@ -48,13 +48,12 @@ def click_continue_if_present(wait, timeout=3):
         time.sleep(0.5)
     return False
 
-def tab_n_times_then_enter(n_tabs, delay=0.15):
+def tab_n_times_then_enter(n_tabs, delay=0.2):
     actions = ActionChains(driver)
-    print(f"Starting {n_tabs}x Tab loop...")
-    for i in range(n_tabs):
+    print(f"Pressing Tab {n_tabs} times...")
+    for _ in range(n_tabs):
         actions.send_keys(Keys.TAB).perform()
         time.sleep(delay)
-        print(f"Tab {i+1}/{n_tabs}")
     actions.send_keys(Keys.ENTER).perform()
     print(f"Pressed Enter after {n_tabs} Tabs")
 
@@ -131,21 +130,17 @@ try:
     print("Switching to Wade Carter with Tab → Down → Tab → Enter...")
     try:
         actions = ActionChains(driver)
-        print("Step 1: Sending Tab...")
         actions.send_keys(Keys.TAB).perform()
-        time.sleep(0.4)
-        print("Step 2: Sending Down arrow...")
+        time.sleep(0.5)
         actions.send_keys(Keys.ARROW_DOWN).perform()
-        time.sleep(0.4)
-        print("Step 3: Sending Tab again...")
+        time.sleep(0.5)
         actions.send_keys(Keys.TAB).perform()
-        time.sleep(0.4)
-        print("Step 4: Sending Enter...")
+        time.sleep(0.5)
         actions.send_keys(Keys.ENTER).perform()
         print("Pressed Tab → Down → Tab → Enter - should have selected Wade Carter")
-        time.sleep(5)  # Give time for page to load Wade's earnings
+        time.sleep(4)
     except Exception as e:
-        print("Keyboard sequence failed:", e)
+        print("Keyboard selection failed:", e)
 
     # === VIEW ALL UPCOMING (Tab 28x → Enter) ===
     print("Navigating to 'View all upcoming' with 28 Tabs + Enter...")
@@ -184,8 +179,8 @@ try:
     print("Going back with Tab 10x + Enter...")
     tab_n_times_then_enter(n_tabs=10)
 
-    # === TAB 40x → Enter FOR PAID ===
-    print("Tab 40x + Enter for paid...")
+    # === TAB 32x → Enter FOR PAID ===
+    print("Tab 32x + Enter for paid...")
     tab_n_times_then_enter(n_tabs=40)
 
     # === DOWNLOAD PAID CSV ===
