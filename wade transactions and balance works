@@ -1,0 +1,220 @@
+import plaid
+from plaid.api import plaid_api
+from plaid.model.transactions_get_request import TransactionsGetRequest
+from plaid.model.transactions_get_request_options import TransactionsGetRequestOptions
+from plaid.model.accounts_balance_get_request import AccountsBalanceGetRequest
+from plaid.configuration import Configuration
+from plaid.api_client import ApiClient
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import pandas as pd
+import os
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import numpy as np
+
+load_dotenv('- wade.env')
+
+print("ENV CHECK")
+print("Tokens:", sum(1 for k in os.environ if k.startswith('PLAID_ACCESS_TOKEN')))
+print("─" * 40 + "\n")
+
+configuration = Configuration(
+    host=getattr(plaid.Environment, os.getenv('PLAID_ENV', 'sandbox').capitalize()),
+    api_key={'clientId': os.getenv('PLAID_CLIENT_ID'), 'secret': os.getenv('PLAID_SECRET')}
+)
+api_client = ApiClient(configuration)
+client = plaid_api.PlaidApi(api_client)
+
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds_path = os.getenv('GOOGLE_CREDENTIALS_PATH', 'wade-service-account.json')
+creds = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
+gc = gspread.authorize(creds)
+
+spreadsheet = gc.open("Wade Finance Dashboard")
+print("Opened: Wade Finance Dashboard\n")
+
+banks = [
+    ('PLAID_ACCESS_TOKEN',   'First Bank',      'First Bank Balance',   'First Bank Transactions'),
+    ('PLAID_ACCESS_TOKEN_2', 'Stockmens',       'Stockmens Balance',    'Stockmens Transactions'),
+    ('PLAID_ACCESS_TOKEN_3', 'First Citizens',  'First Citizens Balance','First Citizens Transactions'),
+    ('PLAID_ACCESS_TOKEN_4', 'ENT',             'ENT Balance',          'ENT Transactions'),
+]
+
+access_tokens = []
+bank_names = {}
+balance_tabs = {}
+tx_tabs = {}
+
+for key, bname, bal_tab, tx_tab in banks:
+    token = os.getenv(key)
+    if token:
+        access_tokens.append(token)
+        bank_names[token] = bname
+        balance_tabs[token] = bal_tab
+        tx_tabs[token] = tx_tab
+
+print(f"Found {len(access_tokens)} tokens\n")
+
+# 60-day range - full pull every run
+end_date = datetime.now().date()
+start_date = end_date - timedelta(days=60)
+print(f"Pulling last 60 days: {start_date} to {end_date}\n")
+
+all_tx_rows = []
+combined_balances = []
+
+for token in access_tokens:
+    bank = bank_names[token]
+    bal_tab = balance_tabs[token]
+    tx_tab = tx_tabs[token]
+
+    print(f"Processing {bank} (60 days)...")
+
+    options = TransactionsGetRequestOptions()
+    request = TransactionsGetRequest(
+        access_token=token,
+        start_date=start_date,
+        end_date=end_date,
+        options=options
+    )
+
+    all_raw = []
+    cursor = None
+    page = 1
+
+    while True:
+        if cursor:
+            request.options.cursor = cursor
+
+        try:
+            resp = client.transactions_get(request)
+            all_raw.extend(resp['transactions'])
+            print(f"  Page {page}: +{len(resp['transactions'])} tx → total {len(all_raw)}")
+            cursor = resp.get('next_cursor')
+            if not cursor:
+                break
+            page += 1
+        except Exception as e:
+            print(f"  Error on page {page}: {str(e)[:150]}...")
+            break
+
+    print(f"  Total fetched from {bank}: {len(all_raw)} transactions")
+
+    cleaned = []
+    for tx in all_raw:
+        row = {}
+        row['transaction_id'] = str(tx.transaction_id or '')
+        row['date'] = str(tx.date) if tx.date else ''
+        row['authorized_date'] = str(tx.authorized_date) if tx.authorized_date else ''
+        row['amount'] = str(tx.amount) if tx.amount is not None else ''
+        row['name'] = str(tx.name or '')
+        row['merchant_name'] = str(tx.merchant_name or '')
+        row['category'] = ', '.join(tx.category) if tx.category else ''
+        row['category_id'] = str(tx.category_id or '')
+        row['payment_channel'] = str(tx.payment_channel or '')
+        row['pending'] = str(tx.pending) if tx.pending is not None else ''
+        row['currency'] = str(tx.iso_currency_code or '')
+        row['bank_name'] = bank
+        cleaned.append(row)
+
+    all_tx_rows.extend(cleaned)
+
+    # Per-bank transaction tab
+    df_bank = pd.DataFrame(cleaned)
+    ws_bank = spreadsheet.worksheet(tx_tab) if tx_tab in [w.title for w in spreadsheet.worksheets()] else \
+              spreadsheet.add_worksheet(title=tx_tab, rows=5000, cols=100)
+    ws_bank.clear()
+    ws_bank.append_rows([df_bank.columns.tolist()] + df_bank.values.tolist())
+    print(f"  → Per-bank tab: {len(df_bank)} rows → '{tx_tab}'")
+
+    # Balance
+    try:
+        bal_resp = client.accounts_balance_get(AccountsBalanceGetRequest(access_token=token))
+        accts = [a.to_dict() for a in bal_resp['accounts']]
+        for a in accts:
+            b = a.get('balances', {})
+            combined_balances.append({
+                'bank_name': bank,
+                'account_name': a.get('name') or 'Unknown',
+                'account_type': a.get('type') or 'Unknown',
+                'current_balance': str(b.get('current') or 0),
+                'available_balance': str(b.get('available') or 0),
+                'limit': str(b.get('limit') or 0),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+    except Exception as e:
+        print(f"  Balance error: {str(e)[:100]}...")
+
+# Combined Transactions - batch upload + strong cleaning
+if all_tx_rows:
+    print(f"\nCombining {len(all_tx_rows)} transactions...")
+
+    df_all = pd.DataFrame(all_tx_rows)
+
+    # Force-clean numeric columns
+    numeric_cols = ['amount', 'pending']  # add more if needed (e.g. 'limit' if added later)
+    for col in numeric_cols:
+        if col in df_all.columns:
+            df_all[col] = pd.to_numeric(df_all[col], errors='coerce').fillna(0).astype(str)
+
+    df_all = df_all.replace({np.nan: None}).fillna('')
+
+    strict_cols = [
+        'transaction_id', 'date', 'authorized_date', 'amount', 'name', 'merchant_name',
+        'category', 'category_id', 'payment_channel', 'pending', 'currency',
+        'bank_name', 'account_name', 'city', 'region', 'postal_code', 'address',
+        'pf_category', 'pf_confidence'
+    ]
+
+    df_all = df_all.reindex(columns=strict_cols)
+
+    try:
+        ws_comb = spreadsheet.worksheet('All Transactions Combined')
+    except gspread.exceptions.WorksheetNotFound:
+        ws_comb = spreadsheet.add_worksheet(title='All Transactions Combined', rows=10000, cols=100)
+
+    # Preserve history - only reset headers if needed
+    existing_headers = ws_comb.row_values(1)
+    if not existing_headers or existing_headers != strict_cols:
+        print("Headers missing/wrong → writing headers")
+        ws_comb.update('A1', [strict_cols])
+
+    # Batch upload
+    print("Uploading in batches of 50...")
+    batch_size = 50
+    total_added = 0
+    for i in range(0, len(df_all), batch_size):
+        batch = df_all.iloc[i:i+batch_size].astype(str).values.tolist()
+        try:
+            ws_comb.append_rows(batch)
+            total_added += len(batch)
+            print(f"  Batch {i//batch_size + 1}: added {len(batch)} rows")
+        except Exception as e:
+            print(f"  Batch {i//batch_size + 1} failed: {str(e)[:150]}...")
+            for j, row in enumerate(batch):
+                try:
+                    ws_comb.append_rows([row])
+                    total_added += 1
+                except Exception as inner_e:
+                    print(f"  Row {i+j} bad: {str(inner_e)[:100]}... skipping")
+                    continue
+
+    print(f"→ Successfully added {total_added} rows to 'All Transactions Combined'")
+
+else:
+    print("No transactions found in the last 60 days.")
+
+# Combined Balances
+if combined_balances:
+    df_bal = pd.DataFrame(combined_balances)
+    df_bal = df_bal.astype(str).replace('nan', '')
+
+    ws_bal = spreadsheet.worksheet('Combined Balances') if 'Combined Balances' in [w.title for w in spreadsheet.worksheets()] else \
+             spreadsheet.add_worksheet(title='Combined Balances', rows=200, cols=20)
+
+    ws_bal.clear()
+    ws_bal.append_rows([df_bal.columns.tolist()] + df_bal.values.tolist())
+    print(f"→ Combined Balances: {len(df_bal)} rows (with account_type)")
+
+print("\nFinished. Refresh the sheet.")
