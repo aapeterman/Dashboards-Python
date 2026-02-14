@@ -1,0 +1,213 @@
+import plaid
+from plaid.api import plaid_api
+from plaid.model.transactions_sync_request import TransactionsSyncRequest
+from plaid.model.accounts_balance_get_request import AccountsBalanceGetRequest
+from plaid.configuration import Configuration
+from plaid.api_client import ApiClient
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import pandas as pd
+import os
+from datetime import datetime
+from dotenv import load_dotenv
+import numpy as np
+
+def recursive_clean(value):
+    if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+        return ''
+    if isinstance(value, dict):
+        return {k: recursive_clean(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [recursive_clean(item) for item in value]
+    if value is None:
+        return ''
+    return value
+
+load_dotenv()
+
+CLIENT_ID = os.getenv('PLAID_CLIENT_ID')
+SECRET = os.getenv('PLAID_SECRET')
+ENV = os.getenv('PLAID_ENV', 'sandbox')
+
+configuration = Configuration(
+    host=getattr(plaid.Environment, ENV.capitalize()),
+    api_key={'clientId': CLIENT_ID, 'secret': SECRET}
+)
+api_client = ApiClient(configuration)
+client = plaid_api.PlaidApi(api_client)
+
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+gc = gspread.authorize(creds)
+spreadsheet = gc.open('Plaid_Transactions')  # ← your original sheet name
+
+# Combined transactions tab
+TRANSACTIONS_TAB = 'All Transactions Combined'
+try:
+    transactions_worksheet = spreadsheet.worksheet(TRANSACTIONS_TAB)
+    print(f"Using existing transactions tab: {TRANSACTIONS_TAB}")
+except gspread.exceptions.WorksheetNotFound:
+    transactions_worksheet = spreadsheet.add_worksheet(title=TRANSACTIONS_TAB, rows=2000, cols=100)
+    print(f"Created transactions tab: {TRANSACTIONS_TAB}")
+
+# Separate balance tabs (only your actual ones)
+BALANCE_TABS = {
+    os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business Balance',
+    os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal Balance',
+    os.getenv('PLAID_ACCESS_TOKEN_3'): 'Chase Balance',
+    os.getenv('PLAID_ACCESS_TOKEN_4'): 'ENT Balance',
+}
+
+BANK_NAMES = {
+    os.getenv('PLAID_ACCESS_TOKEN'): 'ENT Business',
+    os.getenv('PLAID_ACCESS_TOKEN_2'): 'ENT Personal',
+    os.getenv('PLAID_ACCESS_TOKEN_3'): 'Chase',
+    os.getenv('PLAID_ACCESS_TOKEN_4'): 'ENT',
+}
+
+# Load tokens
+ACCESS_TOKENS = []
+token_keys = ['PLAID_ACCESS_TOKEN', 'PLAID_ACCESS_TOKEN_2', 'PLAID_ACCESS_TOKEN_3', 'PLAID_ACCESS_TOKEN_4']
+for key in token_keys:
+    token = os.getenv(key)
+    if token:
+        ACCESS_TOKENS.append(token)
+        print(f"Loaded token from {key}: {token[:20]}...")
+
+if not ACCESS_TOKENS:
+    print("No access tokens found in .env")
+    exit()
+
+print(f"Found {len(ACCESS_TOKENS)} tokens to sync")
+
+all_transactions = []
+
+for token in ACCESS_TOKENS:
+    bank_name = BANK_NAMES.get(token, 'Unknown Bank')
+    transaction_tab_name = TRANSACTIONS_TAB
+    balance_tab_name = BALANCE_TABS.get(token, f'{bank_name} Balance')
+
+    print(f"Syncing '{bank_name}' with token {token[:20]}...")
+
+    cursor_file = f'plaid_cursor_{token[:8]}.txt'
+    cursor = None
+    if os.path.exists(cursor_file):
+        with open(cursor_file, 'r') as f:
+            cursor = f.read().strip()
+
+    sync_cursor = cursor if cursor is not None else ""
+
+    request = TransactionsSyncRequest(access_token=token, cursor=sync_cursor)
+
+    max_retries = 3
+    response = None
+    for attempt in range(max_retries):
+        try:
+            response = client.transactions_sync(request)
+            break
+        except plaid.exceptions.ApiException as e:
+            if "MUTATION_DURING_PAGINATION" in str(e) or "cursor" in str(e).lower():
+                print(f"Mutation/cursor error on attempt {attempt+1} — resetting cursor and retrying...")
+                sync_cursor = ""
+                request.cursor = sync_cursor
+            else:
+                raise e
+    if response is None:
+        print(f"Max retries exceeded for token {token[:20]}")
+        continue
+
+    transactions = response['added'] + response['modified']
+
+    # Tag with bank name
+    for t in transactions:
+        t['bank_name'] = bank_name
+
+    all_transactions.extend(transactions)
+
+    if response['next_cursor']:
+        with open(cursor_file, 'w') as f:
+            f.write(response['next_cursor'])
+
+    print(f"Added/updated {len(transactions)} transactions from '{bank_name}'")
+
+    # Fetch balances
+    try:
+        balance_request = AccountsBalanceGetRequest(access_token=token)
+        balance_response = client.accounts_balance_get(balance_request)
+        accounts = [acc.to_dict() for acc in balance_response['accounts']]
+        print(f"Balances for {balance_tab_name}: {len(accounts)} accounts")
+
+        try:
+            balance_worksheet = spreadsheet.worksheet(balance_tab_name)
+            print(f"Using existing balance tab: {balance_tab_name}")
+        except gspread.exceptions.WorksheetNotFound:
+            balance_worksheet = spreadsheet.add_worksheet(title=balance_tab_name, rows=2000, cols=50)
+            headers = ['account_id', 'name', 'type', 'subtype', 'pending', 'current', 'limit', 'iso_currency_code', 'timestamp', 'bank_name']
+            balance_worksheet.update([headers])
+            print(f"Created new balance tab with headers: {balance_tab_name}")
+
+        new_balance_df = pd.DataFrame([
+            {
+                'account_id': acc['account_id'],
+                'name': acc['name'],
+                'type': acc['type'],
+                'subtype': acc['subtype'],
+                'pending': acc['balances'].get('pending'),
+                'current': acc['balances'].get('current'),
+                'limit': acc['balances'].get('limit'),
+                'iso_currency_code': acc['balances'].get('iso_currency_code'),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'bank_name': bank_name
+            } for acc in accounts
+        ])
+
+        balance_worksheet.clear()
+        balance_worksheet.update([new_balance_df.columns.values.tolist()] + new_balance_df.values.tolist())
+        print(f"Overwrote balances in '{balance_tab_name}' with latest values ({len(new_balance_df)} rows)")
+
+    except Exception as e:
+        print(f"Error handling balances for {balance_tab_name}: {e}")
+
+# Stack separate balance tabs into one "Balance Combined"
+print("\nCreating Balance Combined tab...")
+
+combined_bal_rows = []
+
+for tab_name in BALANCE_TABS.values():
+    try:
+        ws = spreadsheet.worksheet(tab_name)
+        rows = ws.get_all_values()
+        if not rows:
+            print(f"  {tab_name} is empty - skipping")
+            continue
+
+        headers = rows[0]
+        bank_name = tab_name.replace(' Balance', '')
+        print(f"  Reading {tab_name} ({len(rows)-1} rows)")
+
+        for row in rows[1:]:
+            row_dict = dict(zip(headers, row))
+            row_dict['bank_name'] = bank_name
+            combined_bal_rows.append(row_dict)
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"  Tab not found: {tab_name} - skipping")
+    except Exception as e:
+        print(f"  Error reading {tab_name}: {str(e)[:100]}...")
+
+if combined_bal_rows:
+    df_bal = pd.DataFrame(combined_bal_rows)
+
+    ws_bal_comb = spreadsheet.worksheet('Balance Combined') if 'Balance Combined' in [w.title for w in spreadsheet.worksheets()] else \
+                   spreadsheet.add_worksheet(title='Balance Combined', rows=200, cols=20)
+
+    ws_bal_comb.clear()
+    ws_bal_comb.append_rows([df_bal.columns.tolist()] + df_bal.values.tolist())
+    print(f"→ Created/Updated 'Balance Combined': {len(df_bal)} rows")
+else:
+    print("No balance data found in per-bank balance tabs.")
+
+print("\nSync complete.")
+print("Check:")
+print("• All Transactions Combined")
+print("• Balance Combined")
